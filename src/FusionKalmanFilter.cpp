@@ -41,13 +41,13 @@ FusionKalmanFilter::FusionKalmanFilter() :
 }
 
 bool FusionKalmanFilter::processMeasurement(VectorXd &result, const Measurement *measurement) {
+  if (!measurement->valid())
+    return false;
+
   if (!initialized_) {
     init(measurement);
     return false;
   }
-
-  if (!measurement->valid())
-    return false;
 
   float dt = getDeltaTime(measurement);
 
