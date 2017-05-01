@@ -4,12 +4,14 @@
 #include <vector>
 #include <stdlib.h>
 #include "Eigen/Dense"
-#include "FusionEKF.h"
-#include "ground_truth_package.h"
-#include "measurement_package.h"
+#include "FusionKalmanFilter.hpp"
+#include "GroundTruth.hpp"
+#include "Math.hpp"
+#include "Measurement.hpp"
+#include "MeasurementLaser.hpp"
+#include "MeasurementRadar.hpp"
 
 using namespace std;
-using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using std::vector;
 
@@ -61,53 +63,38 @@ int main(int argc, char* argv[]) {
 
   check_files(in_file_, in_file_name_, out_file_, out_file_name_);
 
-  vector<MeasurementPackage> measurement_pack_list;
-  vector<GroundTruthPackage> gt_pack_list;
+  vector<Measurement*> measurements;
+  vector<GroundTruth> ground_truths;
 
   string line;
-
-  // prep the measurement packages (each line represents a measurement at a
-  // timestamp)
   while (getline(in_file_, line)) {
-
-    string sensor_type;
-    MeasurementPackage meas_package;
-    GroundTruthPackage gt_package;
     istringstream iss(line);
     long long timestamp;
 
-    // reads first element from the current line
+    string sensor_type;
     iss >> sensor_type;
     if (sensor_type.compare("L") == 0) {
       // LASER MEASUREMENT
-
-      // read measurements at this timestamp
-      meas_package.sensor_type_ = MeasurementPackage::LASER;
-      meas_package.raw_measurements_ = VectorXd(2);
+      VectorXd measurement{2};
       float x;
       float y;
       iss >> x;
       iss >> y;
-      meas_package.raw_measurements_ << x, y;
+      measurement << x, y;
       iss >> timestamp;
-      meas_package.timestamp_ = timestamp;
-      measurement_pack_list.push_back(meas_package);
+      measurements.push_back( new MeasurementLaser(measurement, timestamp));
     } else if (sensor_type.compare("R") == 0) {
       // RADAR MEASUREMENT
-
-      // read measurements at this timestamp
-      meas_package.sensor_type_ = MeasurementPackage::RADAR;
-      meas_package.raw_measurements_ = VectorXd(3);
+      VectorXd measurement{3};
       float ro;
       float phi;
       float ro_dot;
       iss >> ro;
       iss >> phi;
       iss >> ro_dot;
-      meas_package.raw_measurements_ << ro, phi, ro_dot;
+      measurement << ro, phi, ro_dot;
       iss >> timestamp;
-      meas_package.timestamp_ = timestamp;
-      measurement_pack_list.push_back(meas_package);
+      measurements.push_back(new MeasurementRadar(measurement, timestamp));
     }
 
     // read ground truth data to compare later
@@ -119,57 +106,51 @@ int main(int argc, char* argv[]) {
     iss >> y_gt;
     iss >> vx_gt;
     iss >> vy_gt;
-    gt_package.gt_values_ = VectorXd(4);
-    gt_package.gt_values_ << x_gt, y_gt, vx_gt, vy_gt;
-    gt_pack_list.push_back(gt_package);
+    VectorXd value{4};
+    value << x_gt, y_gt, vx_gt, vy_gt;
+    ground_truths.push_back(GroundTruth(value));
   }
 
   // Create a Fusion EKF instance
-  FusionEKF fusionEKF;
+  FusionKalmanFilter fusion_kalman_filter;
 
   // used to compute the RMSE later
-  vector<VectorXd> estimations;
-  vector<VectorXd> ground_truth;
+  vector<VectorXd> estimation_vector;
+  vector<VectorXd> ground_truth_vector;
 
   //Call the EKF-based fusion
-  size_t N = measurement_pack_list.size();
-  for (size_t k = 0; k < N; ++k) {
-    // start filtering from the second frame (the speed is unknown in the first
-    // frame)
-    fusionEKF.ProcessMeasurement(measurement_pack_list[k]);
-
-    // output the estimation
-    out_file_ << fusionEKF.ekf_.x_(0) << "\t";
-    out_file_ << fusionEKF.ekf_.x_(1) << "\t";
-    out_file_ << fusionEKF.ekf_.x_(2) << "\t";
-    out_file_ << fusionEKF.ekf_.x_(3) << "\t";
-
-    // output the measurements
-    if (measurement_pack_list[k].sensor_type_ == MeasurementPackage::LASER) {
-      // output the estimation
-      out_file_ << measurement_pack_list[k].raw_measurements_(0) << "\t";
-      out_file_ << measurement_pack_list[k].raw_measurements_(1) << "\t";
-    } else if (measurement_pack_list[k].sensor_type_ == MeasurementPackage::RADAR) {
-      // output the estimation in the cartesian coordinates
-      float ro = measurement_pack_list[k].raw_measurements_(0);
-      float phi = measurement_pack_list[k].raw_measurements_(1);
-      out_file_ << ro * cos(phi) << "\t"; // p1_meas
-      out_file_ << ro * sin(phi) << "\t"; // ps_meas
+  size_t measurements_size = measurements.size();
+  for (size_t i = 0; i < measurements_size; ++i) {
+    Measurement *measurement = measurements[i];
+    VectorXd result(4);
+    if ( !fusion_kalman_filter.processMeasurement(result, measurement) ) {
+      continue;
     }
 
-    // output the ground truth packages
-    out_file_ << gt_pack_list[k].gt_values_(0) << "\t";
-    out_file_ << gt_pack_list[k].gt_values_(1) << "\t";
-    out_file_ << gt_pack_list[k].gt_values_(2) << "\t";
-    out_file_ << gt_pack_list[k].gt_values_(3) << "\n";
+    // output the estimation
+    out_file_ << result(0) << "\t";
+    out_file_ << result(1) << "\t";
+    out_file_ << result(2) << "\t";
+    out_file_ << result(3) << "\t";
 
-    estimations.push_back(fusionEKF.ekf_.x_);
-    ground_truth.push_back(gt_pack_list[k].gt_values_);
+    // output the measurements
+    VectorXd cartesian_measurement = measurement->getCartesianMeasurement();
+    out_file_ << cartesian_measurement(0) << "\t";
+    out_file_ << cartesian_measurement(1) << "\t";
+
+    // output the ground truth packages
+    GroundTruth ground_truth = ground_truths[i];
+    out_file_ << ground_truth.getValue()(0) << "\t";
+    out_file_ << ground_truth.getValue()(1) << "\t";
+    out_file_ << ground_truth.getValue()(2) << "\t";
+    out_file_ << ground_truth.getValue()(3) << "\n";
+
+    estimation_vector.push_back(result);
+    ground_truth_vector.push_back(ground_truth.getValue());
   }
 
   // compute the accuracy (RMSE)
-  Tools tools;
-  cout << "Accuracy - RMSE:" << endl << tools.CalculateRMSE(estimations, ground_truth) << endl;
+  cout << "Accuracy - RMSE:" << endl << math::CalculateRMSE(estimation_vector, ground_truth_vector) << endl;
 
   // close files
   if (out_file_.is_open()) {
@@ -179,6 +160,9 @@ int main(int argc, char* argv[]) {
   if (in_file_.is_open()) {
     in_file_.close();
   }
+
+  for ( auto measurement : measurements )
+    delete measurement;
 
   return 0;
 }
